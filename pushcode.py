@@ -16,9 +16,7 @@ A complete webcam-based proctoring system with:
   • Event cooldown, screenshots, Excel reports
 
 
-
 ═══════════════════════════════════════════════════════════════════════════════
-"""
 
 
 import os
@@ -81,7 +79,6 @@ except ImportError:
 # ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  CONFIGURATION  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Detection thresholds
 EAR_THRESHOLD        = 0.25
 EAR_CONSEC_FRAMES    = 20
 NO_FACE_TIMEOUT      = 3.0
@@ -95,19 +92,16 @@ TAB_POLL_INTERVAL    = 0.5
 
 EVENT_COOLDOWN = 3.0
 
-# Paths & camera
 SCREENSHOT_DIR = "screenshots"
 REPORTS_DIR    = "reports"
 RECORDINGS_DIR = "recordings"
 YOLO_MODEL     = "yolov8n.pt"
 CAMERA_INDEX   = 0
 
-# GUI
 FEED_UPDATE_MS = 30
 WINDOW_WIDTH   = 920
 WINDOW_HEIGHT  = 620
 
-# Weighted penalties — every event type has its own cost
 PENALTY_MAP = {
     "No Face Detected":    5,
     "Head Turned Left":    1,
@@ -139,7 +133,6 @@ class EventLogger:
             os.makedirs(d, exist_ok=True)
 
     def log(self, event: str, frame=None, cooldown: float = EVENT_COOLDOWN) -> bool:
-        """Log an event if cooldown has passed. Returns True if logged."""
         now = time.time()
         with self._lock:
             if now - self._last_event_time.get(event, 0) < cooldown:
@@ -192,7 +185,6 @@ class EventLogger:
         threading.Thread(target=_play, daemon=True).start()
 
     def export(self):
-        """Export events to a timestamped Excel file."""
         if not self.events:
             return None
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -227,3 +219,91 @@ class EventLogger:
             self.warning_count = 0
             self.start_time = time.time()
             self._last_event_time.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ░░░░░░░░░░░░░░░░░░░░░░░░░░  AUDIO MONITOR  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AudioMonitor:
+    """Detects speaking via microphone RMS and fires a callback."""
+
+    def __init__(self, on_speaking):
+        self._on_speaking = on_speaking
+        self._stream  = None
+        self._running = False
+
+    def start(self):
+        if not _HAS_AUDIO:
+            return
+        self._running = True
+        try:
+            self._stream = sd.InputStream(
+                channels=1, samplerate=16000, blocksize=1024,
+                callback=self._cb,
+            )
+            self._stream.start()
+        except Exception as e:
+            print(f"⚠  Audio stream error: {e}")
+
+    def stop(self):
+        self._running = False
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+    def _cb(self, indata, frames, time_info, status):
+        if not self._running:
+            return
+        rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+        if rms > AUDIO_THRESHOLD:
+            self._on_speaking(rms)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ░░░░░░░░░░░░░░░░░░░░░░░░  TAB SWITCH MONITOR  ░░░░░░░░░░░░░░░░░░░░░░░░░░░
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TabSwitchMonitor:
+    """Polls foreground window PID; fires callback when focus leaves our app."""
+
+    def __init__(self, on_switch, our_pid: int):
+        self._on_switch   = on_switch
+        self._our_pid     = our_pid
+        self._running     = False
+        self._was_focused = True
+        self._thread      = None
+
+    def start(self):
+        if not _HAS_WIN32:
+            return
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            self._was_focused = (pid == self._our_pid)
+        except Exception:
+            self._was_focused = True
+
+        self._running = True
+        self._thread  = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    def _poll(self):
+        while self._running:
+            try:
+                hwnd = win32gui.GetForegroundWindow()
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                focused = (pid == self._our_pid)
+                if self._was_focused and not focused:
+                    self._on_switch()
+                self._was_focused = focused
+            except Exception:
+                pass
+            time.sleep(TAB_POLL_INTERVAL)
