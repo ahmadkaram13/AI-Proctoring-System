@@ -17,6 +17,8 @@ A complete webcam-based proctoring system with:
 
 
 ═══════════════════════════════════════════════════════════════════════════════
+"""
+
 
 
 import os
@@ -307,3 +309,181 @@ class TabSwitchMonitor:
             except Exception:
                 pass
             time.sleep(TAB_POLL_INTERVAL)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ░░░░░░░░░░░░░░░░░░░░░░░░░░  DETECTION ENGINE  ░░░░░░░░░░░░░░░░░░░░░░░░░░░
+# ═══════════════════════════════════════════════════════════════════════════
+
+class DetectionEngine:
+    """Runs all CV detections on a frame and returns structured results."""
+
+    LEFT_EYE_IDX  = [362, 385, 387, 263, 373, 380]
+    RIGHT_EYE_IDX = [33,  160, 158, 133, 153, 144]
+
+    NOSE_TIP    = 1
+    LEFT_CHEEK  = 234
+    RIGHT_CHEEK = 454
+
+    def __init__(self):
+        self.face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+
+        self.face_mesh = None
+        if _HAS_MEDIAPIPE:
+            self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+                max_num_faces=3, refine_landmarks=True,
+                min_detection_confidence=0.5, min_tracking_confidence=0.5,
+            )
+
+        self.yolo = None
+        if _HAS_YOLO:
+            try:
+                self.yolo = YOLO(YOLO_MODEL)
+            except Exception as e:
+                print(f"⚠  YOLO failed to load: {e}")
+
+        self.ear_consec_count  = 0
+        self.enrolled_encoding = None
+
+    def enroll_face(self, frame) -> bool:
+        if not _HAS_FACEREC:
+            return False
+        rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        encs = face_recognition.face_encodings(rgb)
+        if encs:
+            self.enrolled_encoding = encs[0]
+            return True
+        return False
+
+    @staticmethod
+    def _ear(eye_indices, landmarks, w, h) -> float:
+        pts = [(int(landmarks[i].x * w), int(landmarks[i].y * h)) for i in eye_indices]
+        A = dist.euclidean(pts[1], pts[5])
+        B = dist.euclidean(pts[2], pts[4])
+        C = dist.euclidean(pts[0], pts[3])
+        return (A + B) / (2.0 * C) if C > 0 else 0.0
+
+    def analyze_frame(self, frame):
+        """Run all detections. Returns (results_dict, annotated_frame)."""
+        results = {
+            "status":         "Focused",
+            "face_count":     0,
+            "no_face":        False,
+            "multiple_faces": False,
+            "head_left":      False,
+            "head_right":     False,
+            "drowsy":         False,
+            "phone_detected": False,
+            "unknown_face":   False,
+            "ear":            None,
+        }
+
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # ── Haar face detection ──
+        faces = self.face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+        results["face_count"] = len(faces)
+
+        if len(faces) == 0:
+            results["no_face"] = True
+            results["status"]  = "No Face"
+        elif len(faces) > 1:
+            results["multiple_faces"] = True
+            results["status"]         = "Multiple Faces"
+
+        for (x, y, fw, fh) in faces:
+            cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), 2)
+
+            if self.face_mesh is None:
+                rel_x = (x + fw // 2) / w
+                if rel_x < HEAD_LEFT_THRESHOLD:
+                    results["head_left"] = True
+                    results["status"]    = "Looking Left"
+                elif rel_x > HEAD_RIGHT_THRESHOLD:
+                    results["head_right"] = True
+                    results["status"]     = "Looking Right"
+
+            if _HAS_FACEREC and self.enrolled_encoding is not None:
+                try:
+                    box  = (y, x + fw, y + fh, x)
+                    encs = face_recognition.face_encodings(rgb, [box])
+                    if encs:
+                        match = face_recognition.compare_faces(
+                            [self.enrolled_encoding], encs[0],
+                            tolerance=FACE_RECOGNITION_TOLERANCE,
+                        )[0]
+                        if not match:
+                            results["unknown_face"] = True
+                            results["status"]       = "Unknown Person"
+                            cv2.putText(frame, "UNKNOWN", (x, y - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        else:
+                            cv2.putText(frame, "VERIFIED", (x, y - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                except Exception:
+                    pass
+
+        # ── Face Mesh: head-yaw + EAR drowsiness ──
+        if self.face_mesh is not None:
+            mesh = self.face_mesh.process(rgb)
+            if mesh.multi_face_landmarks:
+                lm = mesh.multi_face_landmarks[0].landmark
+
+                nose_x  = lm[self.NOSE_TIP].x
+                left_x  = lm[self.LEFT_CHEEK].x
+                right_x = lm[self.RIGHT_CHEEK].x
+                span    = right_x - left_x
+                if span > 0.01:
+                    rel_nose = (nose_x - left_x) / span
+                    if rel_nose < HEAD_LEFT_THRESHOLD:
+                        results["head_left"] = True
+                        if results["status"] == "Focused":
+                            results["status"] = "Looking Left"
+                    elif rel_nose > HEAD_RIGHT_THRESHOLD:
+                        results["head_right"] = True
+                        if results["status"] == "Focused":
+                            results["status"] = "Looking Right"
+
+                left_ear  = self._ear(self.LEFT_EYE_IDX,  lm, w, h)
+                right_ear = self._ear(self.RIGHT_EYE_IDX, lm, w, h)
+                avg_ear   = (left_ear + right_ear) / 2.0
+                results["ear"] = avg_ear
+
+                if avg_ear < EAR_THRESHOLD:
+                    self.ear_consec_count += 1
+                else:
+                    self.ear_consec_count = 0
+
+                if self.ear_consec_count >= EAR_CONSEC_FRAMES:
+                    results["drowsy"] = True
+                    results["status"] = "Drowsiness Detected"
+                    cv2.putText(frame, f"EAR {avg_ear:.2f} DROWSY", (10, 65),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                else:
+                    cv2.putText(frame, f"EAR {avg_ear:.2f}", (10, 65),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # ── Phone detection via YOLO ──
+        if self.yolo is not None:
+            try:
+                for r in self.yolo(frame, conf=YOLO_CONFIDENCE, verbose=False):
+                    for box in r.boxes:
+                        if self.yolo.names[int(box.cls)] == "cell phone":
+                            results["phone_detected"] = True
+                            results["status"]         = "Phone Detected"
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                            cv2.putText(frame, "PHONE!", (x1, y1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            except Exception:
+                pass
+
+        color = (0, 255, 0) if results["status"] == "Focused" else (0, 165, 255)
+        cv2.putText(frame, results["status"], (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        return results, frame
