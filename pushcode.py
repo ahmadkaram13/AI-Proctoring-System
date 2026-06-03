@@ -15,7 +15,7 @@ A complete webcam-based proctoring system with:
   • Thread-safe modern GUI with embedded live feed
   • Event cooldown, screenshots, Excel reports
 
-
+═══════════════════════════════════════════════════════════════════════════════
 
 import os
 import time
@@ -77,29 +77,33 @@ except ImportError:
 # ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  CONFIGURATION  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Detection thresholds
 EAR_THRESHOLD        = 0.25
 EAR_CONSEC_FRAMES    = 20
 NO_FACE_TIMEOUT      = 3.0
-HEAD_LEFT_THRESHOLD  = 0.40
+HEAD_LEFT_THRESHOLD  = 0.40   # tighter than before for better accuracy
 HEAD_RIGHT_THRESHOLD = 0.60
 YOLO_CONFIDENCE      = 0.5
 FACE_RECOGNITION_TOLERANCE = 0.6
-AUDIO_THRESHOLD      = 0.025
+AUDIO_THRESHOLD      = 0.025  # RMS volume level
 AUDIO_COOLDOWN       = 4.0
-TAB_POLL_INTERVAL    = 0.5
+TAB_POLL_INTERVAL    = 0.5    # seconds between foreground-window checks
 
 EVENT_COOLDOWN = 3.0
 
+# Paths & camera
 SCREENSHOT_DIR = "screenshots"
 REPORTS_DIR    = "reports"
 RECORDINGS_DIR = "recordings"
 YOLO_MODEL     = "yolov8n.pt"
 CAMERA_INDEX   = 0
 
+# GUI
 FEED_UPDATE_MS = 30
 WINDOW_WIDTH   = 920
 WINDOW_HEIGHT  = 620
 
+# Weighted penalties — every event type has its own cost
 PENALTY_MAP = {
     "No Face Detected":    5,
     "Head Turned Left":    1,
@@ -111,7 +115,7 @@ PENALTY_MAP = {
     "Speaking Detected":   3,
     "Tab Switch Detected": 8,
 }
-DEFAULT_PENALTY = 2
+DEFAULT_PENALTY = 2  # fallback for any unlisted event
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -131,6 +135,7 @@ class EventLogger:
             os.makedirs(d, exist_ok=True)
 
     def log(self, event: str, frame=None, cooldown: float = EVENT_COOLDOWN) -> bool:
+        """Log an event if cooldown has passed. Returns True if logged."""
         now = time.time()
         with self._lock:
             if now - self._last_event_time.get(event, 0) < cooldown:
@@ -183,6 +188,7 @@ class EventLogger:
         threading.Thread(target=_play, daemon=True).start()
 
     def export(self):
+        """Export events to a timestamped Excel file."""
         if not self.events:
             return None
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -279,6 +285,7 @@ class TabSwitchMonitor:
     def start(self):
         if not _HAS_WIN32:
             return
+        # Initialise to actual current focus so first poll never false-fires
         try:
             hwnd = win32gui.GetForegroundWindow()
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -317,9 +324,10 @@ class DetectionEngine:
     LEFT_EYE_IDX  = [362, 385, 387, 263, 373, 380]
     RIGHT_EYE_IDX = [33,  160, 158, 133, 153, 144]
 
-    NOSE_TIP    = 1
-    LEFT_CHEEK  = 234
-    RIGHT_CHEEK = 454
+    # Face mesh landmarks for accurate head-yaw estimation
+    NOSE_TIP    = 1    # nose tip
+    LEFT_CHEEK  = 234  # leftmost face boundary point
+    RIGHT_CHEEK = 454  # rightmost face boundary point
 
     def __init__(self):
         self.face_cascade = cv2.CascadeClassifier(
@@ -380,6 +388,7 @@ class DetectionEngine:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+        # ── Haar face detection (count + fallback pose) ──
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
         results["face_count"] = len(faces)
 
@@ -393,6 +402,7 @@ class DetectionEngine:
         for (x, y, fw, fh) in faces:
             cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), 2)
 
+            # Haar-only fallback pose (used when MediaPipe is unavailable)
             if self.face_mesh is None:
                 rel_x = (x + fw // 2) / w
                 if rel_x < HEAD_LEFT_THRESHOLD:
@@ -402,6 +412,7 @@ class DetectionEngine:
                     results["head_right"] = True
                     results["status"]     = "Looking Right"
 
+            # Face recognition
             if _HAS_FACEREC and self.enrolled_encoding is not None:
                 try:
                     box  = (y, x + fw, y + fh, x)
@@ -422,11 +433,13 @@ class DetectionEngine:
                 except Exception:
                     pass
 
+        # ── Face Mesh: accurate head-yaw pose + drowsiness EAR ──
         if self.face_mesh is not None:
             mesh = self.face_mesh.process(rgb)
             if mesh.multi_face_landmarks:
                 lm = mesh.multi_face_landmarks[0].landmark
 
+                # Head-yaw via nose position between the two cheek landmarks
                 nose_x  = lm[self.NOSE_TIP].x
                 left_x  = lm[self.LEFT_CHEEK].x
                 right_x = lm[self.RIGHT_CHEEK].x
@@ -442,6 +455,7 @@ class DetectionEngine:
                         if results["status"] == "Focused":
                             results["status"] = "Looking Right"
 
+                # Drowsiness via EAR
                 left_ear  = self._ear(self.LEFT_EYE_IDX,  lm, w, h)
                 right_ear = self._ear(self.RIGHT_EYE_IDX, lm, w, h)
                 avg_ear   = (left_ear + right_ear) / 2.0
@@ -461,6 +475,7 @@ class DetectionEngine:
                     cv2.putText(frame, f"EAR {avg_ear:.2f}", (10, 65),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
+        # ── Phone detection via YOLO ──
         if self.yolo is not None:
             try:
                 for r in self.yolo(frame, conf=YOLO_CONFIDENCE, verbose=False):
@@ -475,6 +490,7 @@ class DetectionEngine:
             except Exception:
                 pass
 
+        # Status overlay
         color = (0, 255, 0) if results["status"] == "Focused" else (0, 165, 255)
         cv2.putText(frame, results["status"], (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
@@ -517,6 +533,7 @@ class ProctoringGUI:
         body = ctk.CTkFrame(self.root, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=8, pady=2)
 
+        # Left: webcam feed + REC indicator
         left = ctk.CTkFrame(body, corner_radius=12)
         left.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
@@ -532,6 +549,7 @@ class ProctoringGUI:
         )
         self.rec_indicator.pack(pady=(0, 3))
 
+        # Right: stats + log
         right = ctk.CTkFrame(body, width=310, corner_radius=12)
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
@@ -680,3 +698,251 @@ class ProctoringGUI:
 
     def show_message(self, title, message):
         messagebox.showinfo(title, message)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ░░░░░░░░░░░░░░░░░░░░░░░░  PROCTORING SESSION  ░░░░░░░░░░░░░░░░░░░░░░░░░░░
+# ═══════════════════════════════════════════════════════════════════════════
+
+EVENT_MAP = {
+    "multiple_faces": "Multiple Faces",
+    "head_left":      "Head Turned Left",
+    "head_right":     "Head Turned Right",
+    "drowsy":         "Drowsiness Detected",
+    "phone_detected": "Phone Detected",
+    "unknown_face":   "Unknown Person",
+}
+
+
+class ProctoringSession:
+    """Orchestrator: owns the camera, all monitors, recording, and GUI dispatch."""
+
+    def __init__(self, gui: ProctoringGUI, our_pid: int):
+        self.gui    = gui
+        self.logger = EventLogger()
+        self.engine = DetectionEngine()
+
+        self._running       = False
+        self._thread        = None
+        self._cap           = None
+        self._last_frame    = None
+        self._no_face_since = None
+
+        # Recording
+        self._recording   = False
+        self._recorder    = None
+        self._record_path = None
+
+        # Audio monitor
+        self._audio = AudioMonitor(self._on_speaking)
+
+        # Tab-switch monitor
+        self._tab_monitor = TabSwitchMonitor(self._on_tab_switch, our_pid)
+
+        self._schedule_feed_update()
+
+    def _schedule_feed_update(self):
+        if self._last_frame is not None:
+            try:
+                self.gui.update_frame(self._last_frame)
+            except Exception:
+                pass
+        self.gui.root.after(FEED_UPDATE_MS, self._schedule_feed_update)
+
+    # ── Async-event callbacks (called from non-GUI threads) ──
+
+    def _on_speaking(self, rms):
+        if not self._running:
+            return
+        if self.logger.log("Speaking Detected", self._last_frame, cooldown=AUDIO_COOLDOWN):
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.gui.root.after(0, lambda t=ts: self.gui.add_log("Speaking Detected", t))
+
+    def _on_tab_switch(self):
+        if not self._running:
+            return
+        if self.logger.log("Tab Switch Detected", self._last_frame):
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.gui.root.after(0, lambda t=ts: self.gui.add_log("Tab Switch Detected", t))
+
+    # ── Public actions ──
+
+    def enroll(self):
+        cap = cv2.VideoCapture(CAMERA_INDEX)
+        if not cap.isOpened():
+            self.gui.show_message("Camera Error", "Could not open camera.")
+            return
+        frame = None
+        for _ in range(5):
+            ret, f = cap.read()
+            if ret:
+                frame = f
+        cap.release()
+
+        if frame is None:
+            self.gui.show_message("Error", "Could not capture frame.")
+            return
+        if self.engine.enroll_face(frame):
+            self.gui.show_message("Success", "✅ Face enrolled successfully!")
+            self._last_frame = frame
+        else:
+            self.gui.show_message(
+                "Error", "No face detected. Please face the camera and try again.",
+            )
+
+    def start(self):
+        if self._running:
+            return
+        self._cap = cv2.VideoCapture(CAMERA_INDEX)
+        if not self._cap.isOpened():
+            self.gui.show_message("Camera Error", "Could not open camera.")
+            return
+
+        self._running       = True
+        self._no_face_since = None
+        self.logger.reset()
+        self.gui.set_running(True)
+
+        self._audio.start()
+        self._tab_monitor.start()
+
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        self._audio.stop()
+        self._tab_monitor.stop()
+        if self._recording:
+            self._stop_recording()
+        self.gui.set_running(False)
+
+    def toggle_recording(self):
+        if not self._recording:
+            self._start_recording()
+        else:
+            self._stop_recording()
+
+    def _start_recording(self):
+        if not self._running:
+            self.gui.show_message("Recording", "Please start a session first.")
+            return
+        frame = self._last_frame
+        fh, fw = (frame.shape[:2] if frame is not None else (480, 640))
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._record_path = os.path.join(RECORDINGS_DIR, f"session_{ts}.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self._recorder  = cv2.VideoWriter(self._record_path, fourcc, 20.0, (fw, fh))
+        self._recording = True
+        self.gui.set_recording(True)
+
+    def _stop_recording(self):
+        self._recording = False
+        if self._recorder:
+            self._recorder.release()
+            self._recorder = None
+        self.gui.set_recording(False)
+        if self._record_path:
+            self.gui.show_message("Recording Saved", f"Video saved:\n{self._record_path}")
+            self._record_path = None
+
+    def export(self):
+        path = self.logger.export()
+        if path:
+            self.gui.show_message("Export Complete", f"Report saved:\n{path}")
+        else:
+            self.gui.show_message("Export", "No events to export yet.")
+
+    # ── Detection thread ──
+
+    def _run_loop(self):
+        try:
+            while self._running:
+                ret, frame = self._cap.read()
+                if not ret:
+                    break
+
+                results, annotated = self.engine.analyze_frame(frame)
+                self._last_frame   = annotated
+
+                if self._recording and self._recorder is not None:
+                    try:
+                        self._recorder.write(annotated)
+                    except Exception:
+                        pass
+
+                new_events = self._handle_events(results, annotated)
+                self._update_gui(results, new_events)
+        finally:
+            if self._cap:
+                self._cap.release()
+                self._cap = None
+
+    def _handle_events(self, results, frame):
+        new_events = []
+        now = time.time()
+
+        if results["no_face"]:
+            if self._no_face_since is None:
+                self._no_face_since = now
+            elif now - self._no_face_since > NO_FACE_TIMEOUT:
+                if self.logger.log("No Face Detected", frame):
+                    new_events.append("No Face Detected")
+        else:
+            self._no_face_since = None
+
+        for key, name in EVENT_MAP.items():
+            if results[key]:
+                if self.logger.log(name, frame):
+                    new_events.append(name)
+
+        return new_events
+
+    def _update_gui(self, results, new_events):
+        snap = {
+            "status":   results["status"],
+            "score":    self.logger.score,
+            "warnings": self.logger.warning_count,
+            "elapsed":  self.logger.elapsed,
+            "faces":    results["face_count"],
+            "phone":    results["phone_detected"],
+        }
+        self.gui.root.after(0, lambda s=snap: self.gui.update_stats(
+            s["status"], s["score"], s["warnings"],
+            s["elapsed"], s["faces"], s["phone"],
+        ))
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        for ev in new_events:
+            self.gui.root.after(0, lambda e=ev, t=timestamp: self.gui.add_log(e, t))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  ENTRY POINT  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    our_pid = os.getpid()
+    root    = ctk.CTk()
+    holder  = {}
+
+    gui = ProctoringGUI(
+        root,
+        on_start=lambda:         holder["session"].start(),
+        on_stop=lambda:          holder["session"].stop(),
+        on_enroll=lambda:        holder["session"].enroll(),
+        on_export=lambda:        holder["session"].export(),
+        on_record_toggle=lambda: holder["session"].toggle_recording(),
+    )
+
+    holder["session"] = ProctoringSession(gui, our_pid)
+
+    def on_close():
+        holder["session"].stop()
+        root.after(200, root.destroy)
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
