@@ -1,0 +1,178 @@
+# 🎓 AI Proctoring System
+
+A real-time, webcam-based exam proctoring application built with Python. It monitors candidates during online assessments using computer vision, audio analysis, and window-focus tracking — automatically logging violations and generating weighted penalty reports.
+
+---
+
+## 📸 Features
+
+| Feature | Technology | Description |
+|---|---|---|
+| Face Detection | OpenCV Haar Cascade | Detects missing or multiple faces in frame |
+| Head Pose Estimation | MediaPipe Face Mesh | Tracks nose-to-cheek ratio for left/right gaze |
+| Drowsiness Detection | MediaPipe EAR | Eye Aspect Ratio over consecutive frames |
+| Phone Detection | YOLOv8 (`yolov8n.pt`) | Real-time object detection for cell phones |
+| Identity Verification | `face_recognition` | Enrolls and verifies the candidate's face |
+| Audio Monitoring | `sounddevice` RMS | Detects speaking above a configurable threshold |
+| Tab Switch Detection | `pywin32` | Monitors foreground window PID changes |
+| Session Recording | OpenCV VideoWriter | Saves annotated video as `.mp4` |
+| Excel Reports | `pandas` + `openpyxl` | Exports event log, frequency table, and summary |
+| Weighted Scoring | Custom penalty map | Live focus score (0–100%) updated per event |
+
+---
+
+## 🖥️ GUI Overview
+
+The application uses a dark-themed two-panel layout built with `customtkinter`:
+
+- **Left panel** — Live annotated webcam feed with REC indicator
+- **Right panel** — Session stats (score bar, warnings, duration, face count, phone status) and a scrollable event log
+- **Bottom bar** — Enroll, Start, Stop, Record, and Export buttons
+
+---
+
+## ⚙️ Configuration
+
+All thresholds and settings are defined at the top of the file:
+
+```python
+EAR_THRESHOLD        = 0.25    # Eye closeness threshold for drowsiness
+EAR_CONSEC_FRAMES    = 20      # Frames before drowsiness is flagged
+NO_FACE_TIMEOUT      = 3.0     # Seconds before "No Face" event fires
+HEAD_LEFT_THRESHOLD  = 0.40    # Nose ratio threshold for left gaze
+HEAD_RIGHT_THRESHOLD = 0.60    # Nose ratio threshold for right gaze
+YOLO_CONFIDENCE      = 0.5     # Minimum confidence for phone detection
+AUDIO_THRESHOLD      = 0.025   # RMS level to flag speaking
+EVENT_COOLDOWN       = 3.0     # Seconds between repeat events of same type
+CAMERA_INDEX         = 0       # Webcam index
+```
+
+---
+
+## 🏆 Penalty Map
+
+Each violation type carries a configurable penalty deducted from a starting score of 100:
+
+| Event | Penalty |
+|---|---|
+| Multiple Faces | −20 |
+| Unknown Person | −15 |
+| Tab Switch Detected | −8 |
+| Phone Detected | −10 |
+| No Face Detected | −5 |
+| Drowsiness Detected | −5 |
+| Speaking Detected | −3 |
+| Head Turned Left | −1 |
+| Head Turned Right | −1 |
+
+---
+
+## 📦 Installation
+
+**Python 3.9+ recommended.**
+
+```bash
+pip install opencv-python numpy pandas pillow scipy customtkinter \
+            sounddevice pywin32 mediapipe ultralytics \
+            face_recognition openpyxl
+```
+
+> **Note:** `face_recognition` requires `dlib`. On Windows, install a prebuilt wheel:
+> ```bash
+> pip install dlib‑19.24.1‑cp310‑cp310‑win_amd64.whl
+> pip install face_recognition
+> ```
+
+> **Note:** `pywin32` is Windows-only. Tab-switch detection is automatically disabled on macOS/Linux.
+
+---
+
+## 🚀 Usage
+
+```bash
+python "Final Project.py"
+```
+
+### Workflow
+
+1. **Enroll** — Click `📸 Enroll` to register the candidate's face via webcam.
+2. **Start** — Click `▶ Start` to begin proctoring. Audio and tab-switch monitors activate automatically.
+3. **Record** *(optional)* — Click `🔴 Record` to save the annotated session as an `.mp4` file.
+4. **Stop** — Click `■ Stop` to end the session.
+5. **Export** — Click `📊 Export` to save a timestamped Excel report.
+
+---
+
+## 📁 Output Structure
+
+```
+project/
+├── screenshots/       # Auto-captured frames on each violation
+├── recordings/        # session_YYYYMMDD_HHMMSS.mp4
+└── reports/           # report_YYYYMMDD_HHMMSS.xlsx
+                       #   └── Sheets: Summary | Event Frequency | Events
+```
+
+---
+
+## 🧩 Architecture
+
+```
+main()
+ └── ProctoringSession          # Orchestrator
+      ├── DetectionEngine        # CV: face, pose, EAR, YOLO, face_recognition
+      ├── EventLogger            # Thread-safe log + weighted scoring + Excel export
+      ├── AudioMonitor           # sounddevice RMS callback
+      ├── TabSwitchMonitor       # win32gui foreground-window poller
+      └── ProctoringGUI          # customtkinter two-panel interface
+```
+
+All detection runs on a **background thread**; GUI updates are dispatched safely via `root.after()`.
+
+---
+
+## 🔧 Optional Dependencies
+
+Every external library is wrapped in a `try/except` block. The system degrades gracefully — missing libraries simply disable the corresponding feature with a console warning:
+
+```
+⚠  mediapipe not installed — drowsiness & accurate pose disabled
+⚠  ultralytics not installed — phone detection disabled
+⚠  face_recognition not installed — identity verification disabled
+⚠  sounddevice not installed — audio detection disabled
+⚠  pywin32 not installed — tab-switch detection disabled
+```
+
+---
+
+## 📊 Excel Report Sheets
+
+| Sheet | Contents |
+|---|---|
+| **Summary** | Session duration, total warnings, total penalty, final score, unique event types |
+| **Event Frequency** | Each event type with count and total penalty contributed |
+| **Events** | Full timestamped log with elapsed time, event name, warning number, and penalty |
+
+---
+
+## 🛠️ Dependencies
+
+| Package | Purpose |
+|---|---|
+| `opencv-python` | Camera capture, Haar cascade, frame annotation |
+| `mediapipe` | Face Mesh landmarks (head pose + EAR) |
+| `ultralytics` | YOLOv8 phone detection |
+| `face_recognition` | Face enrollment and identity matching |
+| `sounddevice` | Microphone RMS audio monitoring |
+| `pywin32` | Windows foreground window polling |
+| `customtkinter` | Modern dark-themed GUI |
+| `pandas` + `openpyxl` | Excel report generation |
+| `pillow` | Frame conversion for Tkinter display |
+| `scipy` | Euclidean distance for EAR calculation |
+| `numpy` | Numerical array operations |
+
+---
+
+## 📝 License
+
+This project was developed as a final academic project. Free to use and modify for educational purposes.
