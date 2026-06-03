@@ -16,10 +16,6 @@ A complete webcam-based proctoring system with:
   • Event cooldown, screenshots, Excel reports
 
 
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-
 
 import os
 import time
@@ -384,7 +380,6 @@ class DetectionEngine:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # ── Haar face detection ──
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
         results["face_count"] = len(faces)
 
@@ -427,7 +422,6 @@ class DetectionEngine:
                 except Exception:
                     pass
 
-        # ── Face Mesh: head-yaw + EAR drowsiness ──
         if self.face_mesh is not None:
             mesh = self.face_mesh.process(rgb)
             if mesh.multi_face_landmarks:
@@ -467,7 +461,6 @@ class DetectionEngine:
                     cv2.putText(frame, f"EAR {avg_ear:.2f}", (10, 65),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # ── Phone detection via YOLO ──
         if self.yolo is not None:
             try:
                 for r in self.yolo(frame, conf=YOLO_CONFIDENCE, verbose=False):
@@ -487,3 +480,203 @@ class DetectionEngine:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
         return results, frame
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  THE GUI  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+# ═══════════════════════════════════════════════════════════════════════════
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+class ProctoringGUI:
+    """Two-panel layout: live camera feed + stats, log, and controls."""
+
+    def __init__(self, root, on_start, on_stop, on_enroll, on_export, on_record_toggle):
+        self.root = root
+        self.root.title("AI Proctoring System")
+        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        self.root.resizable(True, True)
+
+        self.on_start         = on_start
+        self.on_stop          = on_stop
+        self.on_enroll        = on_enroll
+        self.on_export        = on_export
+        self.on_record_toggle = on_record_toggle
+
+        self._photo = None
+        self._build()
+
+    def _build(self):
+        ctk.CTkLabel(
+            self.root, text="🎓  AI Proctoring System",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(pady=(6, 2))
+
+        body = ctk.CTkFrame(self.root, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=8, pady=2)
+
+        left = ctk.CTkFrame(body, corner_radius=12)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 10))
+
+        self.video_label = ctk.CTkLabel(
+            left, text="Camera feed appears here",
+            width=500, height=360, fg_color="#1a1a1a", corner_radius=8,
+        )
+        self.video_label.pack(padx=8, pady=(8, 2))
+
+        self.rec_indicator = ctk.CTkLabel(
+            left, text="", font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#CC3333",
+        )
+        self.rec_indicator.pack(pady=(0, 3))
+
+        right = ctk.CTkFrame(body, width=310, corner_radius=12)
+        right.pack(side="right", fill="y")
+        right.pack_propagate(False)
+
+        self._build_stats(right)
+        self._build_log(right)
+        self._build_controls()
+
+    def _build_stats(self, parent):
+        frame = ctk.CTkFrame(parent, corner_radius=10)
+        frame.pack(fill="x", padx=8, pady=(8, 3))
+
+        ctk.CTkLabel(frame, text="Session Stats",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(6, 2))
+
+        self.status_label = ctk.CTkLabel(
+            frame, text="● Idle", font=ctk.CTkFont(size=12), text_color="gray",
+        )
+        self.status_label.pack(pady=1)
+
+        ctk.CTkLabel(frame, text="Focus Score",
+                     font=ctk.CTkFont(size=11)).pack(pady=(4, 0))
+        self.score_bar = ctk.CTkProgressBar(frame, width=255, height=14)
+        self.score_bar.set(1.0)
+        self.score_bar.pack(pady=3)
+
+        self.score_label = ctk.CTkLabel(
+            frame, text="100%", font=ctk.CTkFont(size=17, weight="bold"),
+        )
+        self.score_label.pack()
+
+        grid = ctk.CTkFrame(frame, fg_color="transparent")
+        grid.pack(pady=5)
+        self.warning_val = self._card(grid, "⚠ Warnings", "0",     0, 0)
+        self.time_val    = self._card(grid, "⏱ Duration", "00:00", 0, 1)
+        self.face_val    = self._card(grid, "👤 Faces",   "0",     1, 0)
+        self.phone_val   = self._card(grid, "📱 Phone",   "No",    1, 1)
+
+    def _card(self, parent, title, value, row, col):
+        card = ctk.CTkFrame(parent, corner_radius=8, width=115, height=55)
+        card.grid(row=row, column=col, padx=4, pady=4)
+        card.grid_propagate(False)
+        ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=10),
+                     text_color="gray").pack(pady=(5, 0))
+        val = ctk.CTkLabel(card, text=value,
+                           font=ctk.CTkFont(size=13, weight="bold"))
+        val.pack()
+        return val
+
+    def _build_log(self, parent):
+        frame = ctk.CTkFrame(parent, corner_radius=10)
+        frame.pack(fill="both", expand=True, padx=8, pady=3)
+        ctk.CTkLabel(frame, text="Event Log",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(5, 3))
+        self.log_box = ctk.CTkTextbox(
+            frame, state="disabled", font=ctk.CTkFont(size=11, family="Courier"),
+        )
+        self.log_box.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+    def _build_controls(self):
+        bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        bar.pack(fill="x", padx=8, pady=6)
+
+        self.enroll_btn = ctk.CTkButton(
+            bar, text="📸 Enroll", command=self.on_enroll, width=100, height=30,
+            fg_color="#6B7FD7", hover_color="#5565C7", font=ctk.CTkFont(size=12),
+        )
+        self.enroll_btn.pack(side="left", padx=3)
+
+        self.start_btn = ctk.CTkButton(
+            bar, text="▶ Start", command=self.on_start, width=90, height=30,
+            fg_color="#2E8B57", hover_color="#236B43", font=ctk.CTkFont(size=12),
+        )
+        self.start_btn.pack(side="left", padx=3)
+
+        self.stop_btn = ctk.CTkButton(
+            bar, text="■ Stop", command=self.on_stop, width=90, height=30,
+            fg_color="#CC3333", hover_color="#AA2222", state="disabled",
+            font=ctk.CTkFont(size=12),
+        )
+        self.stop_btn.pack(side="left", padx=3)
+
+        self.record_btn = ctk.CTkButton(
+            bar, text="🔴 Record", command=self.on_record_toggle, width=100, height=30,
+            fg_color="#555555", hover_color="#444444", font=ctk.CTkFont(size=12),
+        )
+        self.record_btn.pack(side="left", padx=3)
+
+        self.export_btn = ctk.CTkButton(
+            bar, text="📊 Export", command=self.on_export, width=100, height=30,
+            fg_color="#555555", hover_color="#444444", font=ctk.CTkFont(size=12),
+        )
+        self.export_btn.pack(side="right", padx=3)
+
+    # ── Public update methods (main thread only) ──
+
+    def update_frame(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb).resize((500, 360))
+        self._photo = ImageTk.PhotoImage(img)
+        self.video_label.configure(image=self._photo, text="")
+
+    def update_stats(self, status, score, warnings, elapsed, faces, phone):
+        color = "#00CC66" if status == "Focused" else "#FF6B6B"
+        self.status_label.configure(text=f"● {status}", text_color=color)
+
+        self.score_label.configure(text=f"{score}%")
+        self.score_bar.set(score / 100)
+        if score > 70:
+            self.score_bar.configure(progress_color="#2E8B57")
+        elif score > 40:
+            self.score_bar.configure(progress_color="#FFA500")
+        else:
+            self.score_bar.configure(progress_color="#CC3333")
+
+        self.warning_val.configure(text=str(warnings))
+        m, s = divmod(int(elapsed), 60)
+        self.time_val.configure(text=f"{m:02d}:{s:02d}")
+        self.face_val.configure(text=str(faces))
+        self.phone_val.configure(text="YES 🔴" if phone else "No")
+
+    def add_log(self, event, timestamp):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"[{timestamp}]  {event}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def set_running(self, running: bool):
+        s_active = "normal" if running else "disabled"
+        s_idle   = "disabled" if running else "normal"
+        self.start_btn.configure(state=s_idle)
+        self.enroll_btn.configure(state=s_idle)
+        self.stop_btn.configure(state=s_active)
+
+    def set_recording(self, recording: bool):
+        if recording:
+            self.record_btn.configure(
+                text="⏹ Stop Rec", fg_color="#CC3333", hover_color="#AA2222",
+            )
+            self.rec_indicator.configure(text="● REC")
+        else:
+            self.record_btn.configure(
+                text="🔴 Record", fg_color="#555555", hover_color="#444444",
+            )
+            self.rec_indicator.configure(text="")
+
+    def show_message(self, title, message):
+        messagebox.showinfo(title, message)
